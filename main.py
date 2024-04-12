@@ -6,13 +6,37 @@ import datetime as dt
 from datetime import datetime, timedelta
 import pytz
 from pathlib import Path
+import signal
+import sys
 
 class InboxEvents:
+    """
+    Class to handle events for new emails in the Outlook inbox.
+
+    Attributes:
+        attachments_path (Path): Directory path where attachments will be saved.
+        no_attachments_path (Path): Directory path where the bodies of emails without attachments will be saved as text files.
+
+    Methods:
+        OnItemAdd(self, item): Triggered automatically when a new mail item is added to the inbox. It checks if the item has attachments. If yes, it saves the attachments; if no, it saves the email body.
+        save_attachments(self, item): Saves all attachments from the mail item to the specified attachments directory.
+        save_body(self, item): Saves the body of the mail item to the specified directory as a text file if there are no attachments.
+    """
     def __init__(self, attachments_path:str|None = None, no_attachments_path:str|None = None):
         self.attachments_path = attachments_path
         self.no_attachments_path = no_attachments_path
     
     def OnItemAdd(self, item):
+        """
+        Called when a new item is added to the inbox. It checks if the item has attachments and handles them accordingly.
+        If the item has attachments, it saves them to the specified path. If not, it saves the body of the email to another path.
+
+        Parameters:
+            item (MailItem): The email item that has been added to the inbox.
+
+        Raises:
+            Exception: Logs an error if there's an issue processing the mail item.
+        """
         try:
             if item.Attachments.Count > 0:
                 self.save_attachments(item)
@@ -22,17 +46,55 @@ class InboxEvents:
             print("Error processing mail item:", e)
 
     def save_attachments(self, item):
+        """
+        Saves all attachments from the specified mail item to the defined attachments path.
+
+        Parameters:
+            item (MailItem): The email item whose attachments need to be saved.
+
+        Notes:
+            Outputs a confirmation for each attachment saved.
+        """
         for attachment in item.Attachments:
             attachment.SaveAsFile(str(self.attachments_path / attachment.FileName))
             print(f"Attachment saved: {attachment.FileName}")
 
     def save_body(self, item):
+        """
+        Saves the body of the specified mail item as a text file in the defined no-attachments path.
+
+        Parameters:
+            item (MailItem): The email item whose body needs to be saved.
+
+        Notes:
+            The filename is derived from the email's subject, sanitizing characters that may cause errors in file naming.
+        """
         body_file_path = self.no_attachments_path / f"{item.Subject.replace(':', '').replace('/', '')}.txt"
         with open(body_file_path, 'w', encoding='utf-8') as file:
             file.write(item.Body)
             print(f"Body saved in file: {body_file_path}")
 
 class Outlook:
+    """
+    Class to interface with Microsoft Outlook for retrieving and handling emails based on various criteria.
+
+    Attributes:
+        outlook_app (COM Object): The Outlook application object.
+        namespace (COM Object): The MAPI namespace used for folder and email access.
+        account (str | None): Specific account name to access in Outlook. Defaults to None for the default account.
+        inbox (COM Object): The default inbox folder for the specified or default account.
+        messages (COM Object): Collection of messages in the inbox.
+        attachments_path (Path): Path where email attachments are saved.
+        no_attachments_path (Path): Path where email bodies are saved when there are no attachments.
+        inbox_events (COM Event Handler): Handler for inbox events using the DispatchWithEvents method.
+
+    Methods:
+        __init__(self, account: str | None = None, attachments_path: str | None = None, no_attachments_path: str | None = None): Initializes the Outlook application, sets paths for attachments and non-attachments, and sets up event handling.
+        get_last_email(self) -> Dict[str, str]: Retrieves the most recent email's details such as subject, body, and received time.
+        get_emails_from_date(self, date_str: str) -> List[Dict[str, str]]: Retrieves all emails from a specified date, considering timezone adjustments.
+        get_emails_with_attachments(self, extension: str) -> List[Dict[str, str]]: Retrieves all emails that contain attachments with a specific file extension.
+        on_new_mail_received(self, mail_item): Method called when a new mail is received; outputs the mail's subject and body.
+    """
     def __init__(self, account: str|None = None, attachments_path: str|None = None, no_attachments_path: str|None = None):
         self.outlook_app = win32com.client.Dispatch("Outlook.Application")
         self.namespace = self.outlook_app.GetNamespace("MAPI")
@@ -60,6 +122,15 @@ class Outlook:
                 print(f"Account not found: {self.account}")
 
     def get_last_email(self) -> Dict[str, str]:
+        """
+        Retrieves the most recent email from the inbox.
+
+        Returns:
+            Dict[str, str]: A dictionary containing the subject, body, and received time of the last email, or an empty dictionary if an error occurs.
+
+        Exceptions:
+            Exception: Captures and prints any exceptions that occur during the retrieval process.
+        """
         try:
             last_message = self.messages.GetLast()
             return {"subject": last_message.Subject,
@@ -71,7 +142,21 @@ class Outlook:
         
     
     def get_emails_from_date(self, date_str: str) -> List[Dict[str, str]]:
-        """Retrieve all emails from a specific date, considering UTC."""
+        """
+        Retrieves all emails from a specific date, adjusting for UTC.
+
+        Parameters:
+            date_str (str): The date from which emails are to be retrieved, formatted as "YYYY-MM-DD".
+
+        Returns:
+            List[Dict[str, str]]: A list of dictionaries, each containing details of an email (subject, body, sender, and received time).
+
+        Notes:
+            There is a known issue where emails from the last week might not be retrieved correctly due to date formatting or filter issues.
+
+        Exceptions:
+            Exception: Captures and prints any exceptions that occur during the filtering process.
+        """
         # Este método tiene un bug: devuelve listas vacías para correos de las última semana
         # parece haber un problema con el filtro o el formato de las fechas que cambia en la última semana
         utc_zone = pytz.utc
@@ -100,7 +185,19 @@ class Outlook:
             print(f"Error filtering emails by date {date_str}: {e}")
             return []
     def get_emails_with_attachments(self, extension: str) -> List[Dict[str, str]]:
-        """Retrieve all emails that have attachments with a specific extension."""
+        """
+        Retrieves all emails that contain attachments with a specified file extension.
+
+        Parameters:
+            extension (str): The file extension to filter by, which should not start with a dot (e.g., 'pdf' for PDF files).
+
+        Returns:
+            List[Dict[str, str]]: A list of dictionaries, each containing details of an email (subject, body, sender, and received time) that has at least one attachment with the specified extension.
+
+        Exceptions:
+            Exception: Captures and prints any exceptions that occur during the retrieval process.
+        """
+
         emails = []
         if not extension.startswith('.'):
             extension = '.' + extension  
@@ -123,14 +220,14 @@ class Outlook:
             print(f"Error retrieving emails with {extension} attachments: {e}")
         return emails
 
-    def on_new_mail_received(self, mail_item):
-        """This method is called when a new mail item is added to the Inbox."""
-        print("New mail received!")
-        print("Subject:", mail_item.Subject)
-        print("Body:", mail_item.Body)
+def signal_handler(sig, frame):
+    print('You pressed Ctrl+C! Stopping...')
+    pythoncom.PumpWaitingMessages()
+    sys.exit(0)
+
 
 if __name__ == "__main__":
-
+    signal.signal(signal.SIGINT, signal_handler)
     outlook = Outlook()
     print("Monitoring new emails. Press Ctrl+C to exit.")
     pythoncom.PumpMessages()
